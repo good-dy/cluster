@@ -10,11 +10,11 @@ from streamlit_folium import st_folium
 # ----------------------------
 # 1. 데이터 로딩
 # ----------------------------
+
 @st.cache_data
 def load_data():
-    df = pd.read_csv("/mnt/data/Delivery.csv")  # Streamlit Cloud에서는 경로 확인 필요
+    df = pd.read_csv("Delivery.csv")
     return df
-
 # ----------------------------
 # 2. Elbow Method (SSE)
 # ----------------------------
