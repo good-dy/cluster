@@ -1,86 +1,136 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import numpy as np
 import plotly.graph_objects as go
-from sklearn.cluster import KMeans
+import plotly.express as px
 import folium
+from sklearn.cluster import KMeans
 from streamlit_folium import st_folium
-from sklearn.metrics import pairwise_distances_argmin_min
 
-# 데이터 로딩
+# ----------------------------
+# 1. 데이터 로딩
+# ----------------------------
 @st.cache_data
 def load_data():
-    df = pd.read_csv("Delivery.csv")
+    df = pd.read_csv("/mnt/data/Delivery.csv")  # Streamlit Cloud에서는 경로 확인 필요
     return df
 
-# 엘보우 메서드로 최적 군집 수 찾기
-def calculate_elbow(data, max_k=10):
-    inertias = []
-    for k in range(1, max_k+1):
-        kmeans = KMeans(n_clusters=k, random_state=42)
-        kmeans.fit(data)
-        inertias.append(kmeans.inertia_)
-    return inertias
+# ----------------------------
+# 2. Elbow Method (SSE)
+# ----------------------------
+def elbow(X, n):
+    sse = []
+    for i in range(1, n+1):
+        km = KMeans(n_clusters=i, n_init=10, random_state=42)
+        km.fit(X)
+        sse.append(km.inertia_)
+    return sse
 
-# Folium 지도 생성
-def generate_folium_map(data, cluster_column):
+# ----------------------------
+# 3. 추천 군집 수 결정
+# ----------------------------
+def recommend_k(inertias):
+    diffs = np.diff(inertias)
+    if len(diffs) < 2:
+        return 3
+    slopes = np.diff(diffs)
+    knee = np.argmax(slopes) + 2  # +2 because index shift and k starts at 1
+    return max(3, min(knee, 10))  # 보정
+
+# ----------------------------
+# 4. Folium 지도 생성 함수
+# ----------------------------
+def generate_folium_map(data, cluster_column, centroids):
     center = [data['Latitude'].mean(), data['Longitude'].mean()]
     m = folium.Map(location=center, zoom_start=12)
 
-    colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightblue', 'gray', 'black', 'pink']
+    colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 
+              'lightblue', 'gray', 'black', 'pink']
 
     for _, row in data.iterrows():
+        cluster_idx = int(row[cluster_column])
         folium.CircleMarker(
             location=[row['Latitude'], row['Longitude']],
             radius=5,
-            color=colors[row[cluster_column] % len(colors)],
+            color=colors[cluster_idx % len(colors)],
             fill=True,
-            fill_color=colors[row[cluster_column] % len(colors)],
+            fill_color=colors[cluster_idx % len(colors)],
             fill_opacity=0.7,
-            popup=f"Num: {row['Num']}, Cluster: {row[cluster_column]}"
+            popup=f"Num: {row['Num']}, Cluster: {cluster_idx}"
+        ).add_to(m)
+
+    # 클러스터 중심 마커 추가
+    for idx, center in enumerate(centroids):
+        folium.Marker(
+            location=[center[0], center[1]],
+            popup=f"Cluster {idx} Center",
+            icon=folium.Icon(color="black", icon="info-sign")
         ).add_to(m)
 
     return m
 
-# Streamlit 앱
+# ----------------------------
+# 5. 메인 앱
+# ----------------------------
 def main():
-    st.set_page_config(page_title="📦 배달 위치 군집 분석", layout="wide")
-    st.title("📦 배달 위치 군집 분석 with KMeans")
+    st.set_page_config(page_title="📦 배달 군집 분석", layout="wide")
+    st.title("📦 배달 위치 클러스터링 분석")
 
     df = load_data()
     coords = df[['Latitude', 'Longitude']]
 
-    st.subheader("데이터 미리보기")
+    st.subheader("🧾 데이터 미리보기")
     st.dataframe(df)
 
-    st.subheader("📈 군집 수 결정: Elbow Method")
-    inertias = calculate_elbow(coords, max_k=10)
+    # Elbow 계산 및 시각화
+    st.subheader("📈 Elbow Method로 군집 수 추천")
+    inertias = elbow(coords, n=10)
 
     fig_elbow = go.Figure()
     fig_elbow.add_trace(go.Scatter(x=list(range(1, 11)), y=inertias, mode='lines+markers'))
-    fig_elbow.update_layout(title="엘보우 그래프", xaxis_title="k (군집 수)", yaxis_title="Inertia")
+    fig_elbow.update_layout(title="Elbow Graph (SSE vs K)", xaxis_title="군집 수 (k)", yaxis_title="SSE")
     st.plotly_chart(fig_elbow, use_container_width=True)
 
-    # 기본 추천: 기울기 급격히 꺾이는 지점 추정
-    diffs = [inertias[i] - inertias[i + 1] for i in range(len(inertias) - 1)]
-    suggested_k = diffs.index(max(diffs)) + 1 + 1  # +1 for index offset, +1 for next k
-
+    suggested_k = recommend_k(inertias)
     st.success(f"추천 군집 수: {suggested_k}")
 
     k = st.slider("최종 군집 수 선택", min_value=2, max_value=10, value=suggested_k)
 
-    kmeans = KMeans(n_clusters=k, random_state=42)
-    df['Cluster'] = kmeans.fit_predict(coords)
+    model = KMeans(n_clusters=k, n_init=10, random_state=42)
+    df['Cluster'] = model.fit_predict(coords)
+    centroids = model.cluster_centers_
 
-    st.subheader("📍 Plotly 시각화")
-    fig = px.scatter_mapbox(df, lat="Latitude", lon="Longitude", color=df["Cluster"].astype(str),
-                            zoom=10, height=500, mapbox_style="open-street-map",
-                            hover_data=["Num"])
-    st.plotly_chart(fig, use_container_width=True)
+    # Plotly 지도
+    st.subheader("📍 Plotly 지도 시각화")
+    fig_map = px.scatter_mapbox(df, lat="Latitude", lon="Longitude",
+                                color=df["Cluster"].astype(str),
+                                zoom=10, height=500, mapbox_style="open-street-map",
+                                hover_data=["Num"])
+    # 중심점 추가
+    centroid_df = pd.DataFrame(centroids, columns=["Latitude", "Longitude"])
+    centroid_df["Cluster"] = [f"Center {i}" for i in range(len(centroids))]
 
-    st.subheader("🗺️ Folium 지도")
-    folium_map = generate_folium_map(df, 'Cluster')
-    st_data = st_folium(folium_map, width=700)
+    fig_map.add_trace(
+        px.scatter_mapbox(centroid_df, lat="Latitude", lon="Longitude", text="Cluster",
+                          marker=dict(size=14, color="black")).data[0]
+    )
+
+    st.plotly_chart(fig_map, use_container_width=True)
+
+    # Folium 지도
+    st.subheader("🗺️ Folium 지도 시각화")
+    folium_map = generate_folium_map(df, 'Cluster', centroids)
+    st_data = st_folium(folium_map, width=700, height=500)
+
+    # 군집별 배달 수 막대그래프
+    st.subheader("📊 각 군집별 배달 건수 총합")
+    grouped = df.groupby("Cluster")["Num"].sum().reset_index()
+
+    fig_bar = px.bar(grouped, x="Cluster", y="Num",
+                     labels={"Cluster": "클러스터", "Num": "총 배달 건수"},
+                     text_auto=True,
+                     title="군집별 배달 건수 총합")
+    st.plotly_chart(fig_bar, use_container_width=True)
 
 if __name__ == "__main__":
     main()
